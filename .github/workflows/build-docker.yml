@@ -1,0 +1,94 @@
+name: Build Docker Image
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  repository_dispatch:
+    types: [docker]
+  workflow_dispatch:
+    inputs:
+      Force_update:
+        description: "强制更新"
+        type: boolean
+        default: false
+        required: false
+  push:
+    branches:
+      - "main"
+      - "releases/**"
+    tags:
+      - v*
+    paths:
+      - "**/*docker*"
+      - "**/*sh*"
+
+  schedule:
+    - cron: "10 11 * * 6"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: nginx
+
+jobs:
+  Build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Init
+        run: |
+          chmod +x $GITHUB_WORKSPACE/*
+          full_image_name="${{ env.REGISTRY }}/${{ github.actor }}/${{ env.IMAGE_NAME }}"
+          echo "full_image_name=$full_image_name" >>"$GITHUB_ENV"
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: ${{ env.full_image_name }}
+
+      - name: Set Up QEMU
+        uses: docker/setup-qemu-action@v2
+
+      - name: Set Up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login To DockerHub
+        if: github.event_name != 'pull_request' && needs.check_update.outputs.REBUILD == 'true'
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建初始化
+        run: |
+          source_arch=$(uname -m)
+          case "${source_arch}" in
+          'amd64' | 'x86_64')
+              format_arch='linux/amd64'
+              ;;
+          'armv8' | 'aarch64')
+              format_arch='linux/arm64'
+              ;;
+          *)
+              echo "未配置的架构"
+              exit 1
+              ;;
+          esac
+          echo "format_arch=$format_arch" >>"$GITHUB_ENV"
+          universal_arch=$(basename ${format_arch})
+          echo "universal_arch=$universal_arch" >>"$GITHUB_ENV"
+
+      - name: Build & Push Multiarch Image
+        uses: docker/build-push-action@v3
+        with:
+          platforms: ${{ env.format_arch }}
+          file: Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ env.full_image_name }}:${{ env.universal_arch }}
+          labels: ${{ steps.meta.outputs.labels }}
